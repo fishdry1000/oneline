@@ -1,0 +1,27 @@
+[project]
+name = "oneline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "鱼前三百", email = "stickymouse27@outlook.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "pytest>=9.1.1",
+]
+
+[project.scripts]
+oneline = "oneline:main"
+
+[dependency-groups]
+dev = ["pytest>=8.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+xfail_strict = true
+
+[build-system]
+requires = ["uv_build>=0.12.23,<0.13.0"]
+build-backend = "uv_build"
