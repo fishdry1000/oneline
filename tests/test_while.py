@@ -5,8 +5,8 @@ The loop compiles to `for _ in takewhile(lambda: (not breaked) and test,
 iter(int, 1))`, so a taken break flips the predicate off while a normal
 condition exit leaves it on for the else gate.
 
-Bodies use `i = i + 1` rather than `i += 1`: AugAssign is unsupported in its
-own right and would mask what these tests are about.
+Counters use `i = i + 1` rather than `i += 1` so these tests stay about the
+while machinery itself, not the augmented-assignment translation.
 """
 
 def test_while_plain(run_both):

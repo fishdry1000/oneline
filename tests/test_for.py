@@ -1,9 +1,54 @@
-"""for ... else: the else body runs iff the loop finished without a break.
+"""for loops: a ListComp over the iterable; break/continue ride the shared
+__oneline_break__/__oneline_continue__ flags — break wraps the iterator in
+takewhile(lambda: not flag, it), continue short-circuits the remaining body
+statements behind `flag or (...)`.
 
-Tests that fail right now are marked xfail(strict=True) -- they are the
-acceptance criteria for the remaining work; once they XPASS, promote them
-to plain tests.
+for-else: after the loop, `flag or else_body` runs the else only on normal
+completion. The flags are restored unconditionally after the else gate —
+"restore only what you consumed": a break raised inside the else body
+belongs to an enclosing loop and must stay True past this loop's cleanup.
+test_else_break_targets_outer_loop pins that timing.
 """
+
+
+def test_for_plain(run_both):
+    src = "for i in range(3):\n    print(i)\n"
+    assert run_both(src) == "0\n1\n2\n"
+
+
+def test_for_continue(run_both):
+    src = "for i in range(6):\n    if i % 2:\n        continue\n    print(i)\n"
+    assert run_both(src) == "0\n2\n4\n"
+
+
+def test_for_break(run_both):
+    src = (
+        "for i in range(10):\n"
+        "    print(i)\n"
+        "    if i == 2:\n"
+        "        break\n"
+        "print('after')\n"
+    )
+    assert run_both(src) == "0\n1\n2\nafter\n"
+
+
+def test_for_nested(run_both):
+    src = "for i in range(2):\n    for j in range(2):\n        print(i, j)\n"
+    assert run_both(src) == "0 0\n0 1\n1 0\n1 1\n"
+
+
+def test_nested_continue(run_both):
+    src = (
+        "for i in range(2):\n"
+        "    for j in range(1):\n"
+        "        if j == 0:\n"
+        "            continue\n"
+        "        print('unreachable')\n"
+        "    if i == 5:\n"
+        "        continue\n"
+        "    print('tail', i)\n"
+    )
+    assert run_both(src) == "tail 0\ntail 1\n"
 
 
 def test_else_runs_on_normal_completion(run_both):
