@@ -44,7 +44,6 @@ from ast import (
     Tuple,
     UnaryOp,
     While,
-    alias,
     arguments,
     comprehension,
     expr,
@@ -60,6 +59,13 @@ from typing import ClassVar, Literal, get_args
 class NotSupportedSyntaxError(ValueError): ...
 
 
+class _Scope:
+    def __init__(self, name: str | None):
+        self.name = name
+        self.nonlocals: set[str] = set()
+        self.globals: set[str] = set()
+
+
 class OneLine(NodeTransformer):
     type BreakType = Literal["break", "continue", "return"]
     BREAK_TYPES: tuple[BreakType, ...] = get_args(BreakType.__value__)
@@ -72,8 +78,7 @@ class OneLine(NodeTransformer):
         }
         self.used_features: set[OneLine.Feature] = set()
         self.just_breaked: set[OneLine.BreakType] = set()
-        self.nonlocals: set[str] = set()
-        self.globals: set[str] = set()
+        self._scopes: list[_Scope] = [_Scope(None)]
 
     @staticmethod
     def _gen_name(s: str):
@@ -186,6 +191,10 @@ class OneLine(NodeTransformer):
     )
 
     def visit_Module(self, node: Module) -> expr:
+        try:
+            compile(unparse(node), "<oneline>", "exec")
+        except SyntaxError as e:
+            raise NotSupportedSyntaxError(node) from e
         res = self.list_visit(node.body)
         if "break" in self.used_features:
             res = self._conj(parse(self.TAKEWHILE, mode="eval").body, res)
@@ -193,15 +202,6 @@ class OneLine(NodeTransformer):
             res = self._conj(
                 self._store_name(
                     "operator", Call(Name("__import__"), [Constant("operator")])
-                ),
-                res,
-            )
-        if "nonlocal" in self.used_features:
-            res = self._conj(
-                self.visit_ImportFrom(
-                    ImportFrom(
-                        "sys", [alias("_getframe", self._gen_name("_getframe"))], 0
-                    )
                 ),
                 res,
             )
@@ -429,42 +429,55 @@ class OneLine(NodeTransformer):
         )
 
     def visit_Nonlocal(self, node: Nonlocal) -> Tuple:
-        self.nonlocals |= set(node.names)
+        self._scopes[-1].nonlocals |= set(node.names)
         self.used_features.add("nonlocal")
         return Tuple([])
 
     def visit_Global(self, node: Global) -> Tuple:
-        self.globals |= set(node.names)
+        self._scopes[-1].globals |= set(node.names)
         return Tuple([])
 
     def _check_scope(self, node: expr) -> expr:
-        if not self.globals and not self.nonlocals:
+        scope = self._scopes[-1]
+        if not scope.globals and not scope.nonlocals:
             return node
 
         class CheckScope(NodeTransformer):
-            outer = self
-
             def visit_Lambda(self, node: Lambda) -> Lambda:
                 return node
 
             def visit_NamedExpr(self, node: NamedExpr) -> AST:
-                if node.target.id in self.outer.nonlocals:
-                    dic = Attribute(
-                        Call(OneLine._load_name("_getframe"), [Constant(1)]), "f_locals"
+                if node.target.id in scope.nonlocals and scope.name is not None:
+                    fn = Name(scope.name)
+                    cell = Subscript(
+                        Attribute(fn, "__closure__"),
+                        Call(
+                            Attribute(
+                                Attribute(Attribute(fn, "__code__"), "co_freevars"),
+                                "index",
+                            ),
+                            [Constant(node.target.id)],
+                        ),
                     )
-                elif node.target.id in self.outer.globals:
-                    dic = Call(Name("globals"))
+                    store = Call(
+                        Name("setattr"),
+                        [cell, Constant("cell_contents"), OneLine._load_name("value")],
+                    )
+                    tail = Name(node.target.id)
+                elif node.target.id in scope.globals:
+                    store = Call(
+                        Attribute(Call(Name("globals")), "__setitem__"),
+                        [Constant(node.target.id), OneLine._load_name("value")],
+                    )
+                    tail = OneLine._load_name("value")
                 else:
                     return self.generic_visit(node)
 
                 return Subscript(
-                    self.outer._conj(
+                    OneLine._conj(
                         OneLine._store_name("value", self.visit(node.value)),
-                        Call(
-                            Attribute(dic, "__setitem__"),
-                            [Constant(node.target.id), OneLine._load_name("value")],
-                        ),
-                        OneLine._load_name("value"),
+                        store,
+                        tail,
                     ),
                     Constant(-1),
                 )
@@ -472,7 +485,7 @@ class OneLine(NodeTransformer):
         return CheckScope().visit(node)
 
     def visit_FunctionDef(self, node: FunctionDef) -> NamedExpr:
-        prior_nonlocals, prior_globals = set(self.nonlocals), set(self.globals)
+        self._scopes.append(_Scope(node.name))
         res = NamedExpr(
             Name(node.name),
             Lambda(
@@ -489,10 +502,11 @@ class OneLine(NodeTransformer):
                 ),
             ),
         )
-        self.nonlocals, self.globals = prior_nonlocals, prior_globals
+        self._scopes.pop()
         return res
 
     def visit_ClassDef(self, node: ClassDef) -> NamedExpr:
+        self._scopes.append(_Scope(None))
         if not node.body:
             raise NotSupportedSyntaxError(node)
         elts = []
@@ -514,6 +528,7 @@ class OneLine(NodeTransformer):
                 metaclass = kw.value
             else:
                 keywords.append(kw)
+        self._scopes.pop()
         return NamedExpr(
             Name(node.name),
             Call(
