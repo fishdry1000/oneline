@@ -22,6 +22,7 @@ from ast import (
     Expr,
     For,
     FunctionDef,
+    Global,
     If,
     IfExp,
     Import,
@@ -29,21 +30,21 @@ from ast import (
     Lambda,
     List,
     ListComp,
-    Load,
     Module,
     Name,
     NamedExpr,
     NodeTransformer,
+    Nonlocal,
     Not,
     Or,
     Pass,
     Return,
     Slice,
-    Store,
     Subscript,
     Tuple,
     UnaryOp,
     While,
+    alias,
     arguments,
     comprehension,
     expr,
@@ -63,7 +64,7 @@ class OneLine(NodeTransformer):
     type BreakType = Literal["break", "continue", "return"]
     BREAK_TYPES: tuple[BreakType, ...] = get_args(BreakType.__value__)
     type BreakHandler = Callable[[expr | None], None]
-    type Feature = BreakType | Literal["aug_assign"]
+    type Feature = BreakType | Literal["aug_assign", "nonlocal"]
 
     def __init__(self) -> None:
         self.break_handlers: dict[OneLine.BreakType, list[OneLine.BreakHandler]] = {
@@ -71,20 +72,8 @@ class OneLine(NodeTransformer):
         }
         self.used_features: set[OneLine.Feature] = set()
         self.just_breaked: set[OneLine.BreakType] = set()
-
-    def visit(self, node: AST) -> expr:
-        print(f"visiting: {type(node).__name__}")
-        res = super().visit(node)
-        if not isinstance(res, expr):
-            raise NotSupportedSyntaxError(node)
-        return res
-
-    def list_visit(
-        self,
-        nodes: list[stmt],
-    ) -> Tuple:
-        print(f"list visiting: {[type(node).__name__ for node in nodes]}")
-        return self._conj(*(self.visit(node) for node in nodes))
+        self.nonlocals: set[str] = set()
+        self.globals: set[str] = set()
 
     @staticmethod
     def _gen_name(s: str):
@@ -97,19 +86,19 @@ class OneLine(NodeTransformer):
 
     @staticmethod
     def _load_name(s: str) -> Name:
-        return Name(OneLine._gen_name(s), Load())
+        return Name(OneLine._gen_name(s))
 
     @staticmethod
     def _load_break_name(t: BreakType):
-        return Name(OneLine._gen_name(t), Load())
+        return Name(OneLine._gen_name(t))
 
     @staticmethod
     def _store_name(s: str, v: expr) -> NamedExpr:
-        return NamedExpr(Name(OneLine._gen_name(s), Store()), v)
+        return NamedExpr(Name(OneLine._gen_name(s)), v)
 
     @staticmethod
     def _store_break_name(t: BreakType, v: expr) -> NamedExpr:
-        return NamedExpr(Name(OneLine._gen_name(t), Store()), v)
+        return NamedExpr(Name(OneLine._gen_name(t)), v)
 
     @staticmethod
     def _conj(*es: expr) -> Tuple:
@@ -119,12 +108,25 @@ class OneLine(NodeTransformer):
                 elts.extend(e.elts)
             else:
                 elts.append(e)
-        return Tuple(elts, Load())
+        return Tuple(
+            elts,
+        )
+
+    def visit(self, node: AST) -> expr:
+        print(f"visiting: {type(node).__name__}")
+        res = super().visit(node)
+        if not isinstance(res, expr):
+            raise NotSupportedSyntaxError(node)
+        return res
+
+    def list_visit(self, nodes: list[stmt]) -> Tuple:
+        print(f"list visiting: {[type(node).__name__ for node in nodes]}")
+        return self._conj(*(self.visit(node) for node in nodes))
 
     def list_visit_breakable(self, nodes: list[stmt], *break_types: BreakType) -> Tuple:
         print(f"breakable list visiting: {[type(node).__name__ for node in nodes]}")
         self.used_features |= set(break_types)
-        tup: Tuple = Tuple([], Load())
+        tup: Tuple = Tuple([])
         cur: list[expr] = tup.elts
         is_breaking, break_value = None, None
 
@@ -140,10 +142,10 @@ class OneLine(NodeTransformer):
         self.just_breaked = set()
         node = None
         for node in nodes:
-            cur.append(self.visit(node))
+            cur.append(self._check_scope(self.visit(node)))
             if is_breaking:
                 self.just_breaked.add(is_breaking)
-                newtup = Tuple(elts=[], ctx=Load())
+                newtup = Tuple([])
                 cur.append(BoolOp(Or(), [self._load_break_name(is_breaking), newtup]))
                 cur = newtup.elts
                 is_breaking, break_value = False, None
@@ -167,7 +169,7 @@ class OneLine(NodeTransformer):
     def visit_Return(self, node: Return) -> NamedExpr:
         self.bubble_break("return", node.value)
         return self._store_break_name(
-            "return", Tuple([node.value] if node.value else [Constant(None)], Load())
+            "return", Tuple([node.value] if node.value else [Constant(None)])
         )
 
     def visit_Break(self, node: Break) -> NamedExpr:
@@ -190,7 +192,16 @@ class OneLine(NodeTransformer):
         if "aug_assign" in self.used_features:
             res = self._conj(
                 self._store_name(
-                    "operator", Call(Name("__import__", Load()), [Constant("operator")])
+                    "operator", Call(Name("__import__"), [Constant("operator")])
+                ),
+                res,
+            )
+        if "nonlocal" in self.used_features:
+            res = self._conj(
+                self.visit_ImportFrom(
+                    ImportFrom(
+                        "sys", [alias("_getframe", self._gen_name("_getframe"))], 0
+                    )
                 ),
                 res,
             )
@@ -250,11 +261,11 @@ class OneLine(NodeTransformer):
                 )
                 if "break" in self.just_breaked
                 else Lambda(arguments(), node.test),
-                Call(Name("iter", Load()), [Name("int", Load()), Constant(1)]),
+                Call(Name("iter"), [Name("int"), Constant(1)]),
             ],
         )
 
-        lc = ListComp(elt, [comprehension(Name("_", Store()), iter, [], is_async=0)])
+        lc = ListComp(elt, [comprehension(Name("_"), iter, [], is_async=0)])
 
         if node.orelse:
             lc = self._conj(
@@ -271,14 +282,14 @@ class OneLine(NodeTransformer):
         return lc
 
     def visit_Pass(self, node: Pass) -> Tuple:
-        return Tuple([], Load())
+        return Tuple([])
 
     @staticmethod
     def _fix_slice(s: Slice) -> Call:
         args = [e or Constant(None) for e in (s.lower, s.upper)]
         if s.step is not None:
             args.append(s.step)
-        return Call(Name("slice", Load()), args)
+        return Call(Name("slice"), args)
 
     def visit_Assign(self, node: Assign) -> Tuple:
         elts = []
@@ -293,13 +304,9 @@ class OneLine(NodeTransformer):
                 case Subscript(val, sli):
                     if isinstance(sli, Slice):
                         sli = self._fix_slice(sli)
-                    elts.append(
-                        Call(Attribute(val, "__setitem__", Load()), [sli, value])
-                    )
+                    elts.append(Call(Attribute(val, "__setitem__"), [sli, value]))
                 case Attribute(val, attr):
-                    elts.append(
-                        Call(Name("setattr", Load()), [val, Constant(attr), value])
-                    )
+                    elts.append(Call(Name("setattr"), [val, Constant(attr), value]))
                 case _:
                     raise NotSupportedSyntaxError(target)
         return self._conj(*elts)
@@ -329,7 +336,7 @@ class OneLine(NodeTransformer):
         match node.target:
             case Name():
                 return NamedExpr(
-                    node.target, Call(iop, [Name(node.target.id, Load()), node.value])
+                    node.target, Call(iop, [Name(node.target.id), node.value])
                 )
             case Subscript(val, sli):
                 if isinstance(sli, Slice):
@@ -338,7 +345,7 @@ class OneLine(NodeTransformer):
                     self._store_name("aug_obj", val),
                     self._store_name("aug_key", sli),
                     Call(
-                        Attribute(self._load_name("aug_obj"), "__setitem__", Load()),
+                        Attribute(self._load_name("aug_obj"), "__setitem__"),
                         [
                             self._load_name("aug_key"),
                             Call(
@@ -347,7 +354,6 @@ class OneLine(NodeTransformer):
                                     Subscript(
                                         self._load_name("aug_obj"),
                                         self._load_name("aug_key"),
-                                        Load(),
                                     ),
                                     node.value,
                                 ],
@@ -359,14 +365,14 @@ class OneLine(NodeTransformer):
                 return self._conj(
                     self._store_name("aug_obj", val),
                     Call(
-                        Name("setattr", Load()),
+                        Name("setattr"),
                         [
                             self._load_name("aug_obj"),
                             Constant(attr),
                             Call(
                                 iop,
                                 [
-                                    Attribute(self._load_name("aug_obj"), attr, Load()),
+                                    Attribute(self._load_name("aug_obj"), attr),
                                     node.value,
                                 ],
                             ),
@@ -382,14 +388,14 @@ class OneLine(NodeTransformer):
         return self._conj(
             *(
                 NamedExpr(
-                    Name(name.asname or name.name, Store()),
+                    Name(name.asname or name.name),
                     Call(
-                        Name("__import__", Load()),
+                        Name("__import__"),
                         [
                             Constant(name.name),
-                            Call(Name("globals", Load())),
-                            Call(Name("locals", Load())),
-                            List([Constant("")], Load()),
+                            Call(Name("globals")),
+                            Call(Name("locals")),
+                            List([Constant("")]),
                         ],
                     ),
                 )
@@ -404,31 +410,71 @@ class OneLine(NodeTransformer):
             self._store_name(
                 "mod",
                 Call(
-                    Name("__import__", Load()),
+                    Name("__import__"),
                     [
                         Constant(node.module),
-                        Call(Name("globals", Load())),
-                        Call(Name("locals", Load())),
-                        List([Constant(name.name) for name in node.names], Load()),
+                        Call(Name("globals")),
+                        Call(Name("locals")),
+                        List([Constant(name.name) for name in node.names]),
                     ],
                 ),
             ),
             *(
                 NamedExpr(
-                    Name(name.asname or name.name, Store()),
-                    Attribute(
-                        self._load_name("mod"),
-                        name.name,
-                        Load(),
-                    ),
+                    Name(name.asname or name.name),
+                    Attribute(self._load_name("mod"), name.name),
                 )
                 for name in node.names
             ),
         )
 
+    def visit_Nonlocal(self, node: Nonlocal) -> Tuple:
+        self.nonlocals |= set(node.names)
+        self.used_features.add("nonlocal")
+        return Tuple([])
+
+    def visit_Global(self, node: Global) -> Tuple:
+        self.globals |= set(node.names)
+        return Tuple([])
+
+    def _check_scope(self, node: expr) -> expr:
+        if not self.globals and not self.nonlocals:
+            return node
+
+        class CheckScope(NodeTransformer):
+            outer = self
+
+            def visit_Lambda(self, node: Lambda) -> Lambda:
+                return node
+
+            def visit_NamedExpr(self, node: NamedExpr) -> AST:
+                if node.target.id in self.outer.nonlocals:
+                    dic = Attribute(
+                        Call(OneLine._load_name("_getframe"), [Constant(1)]), "f_locals"
+                    )
+                elif node.target.id in self.outer.globals:
+                    dic = Call(Name("globals"))
+                else:
+                    return self.generic_visit(node)
+
+                return Subscript(
+                    self.outer._conj(
+                        OneLine._store_name("value", self.visit(node.value)),
+                        Call(
+                            Attribute(dic, "__setitem__"),
+                            [Constant(node.target.id), OneLine._load_name("value")],
+                        ),
+                        OneLine._load_name("value"),
+                    ),
+                    Constant(-1),
+                )
+
+        return CheckScope().visit(node)
+
     def visit_FunctionDef(self, node: FunctionDef) -> NamedExpr:
-        return NamedExpr(
-            Name(node.name, Store()),
+        prior_nonlocals, prior_globals = set(self.nonlocals), set(self.globals)
+        res = NamedExpr(
+            Name(node.name),
             Lambda(
                 node.args,
                 Subscript(
@@ -443,6 +489,8 @@ class OneLine(NodeTransformer):
                 ),
             ),
         )
+        self.nonlocals, self.globals = prior_nonlocals, prior_globals
+        return res
 
     def visit_ClassDef(self, node: ClassDef) -> NamedExpr:
         if not node.body:
@@ -453,18 +501,13 @@ class OneLine(NodeTransformer):
             and isinstance(node.body[0].value, Constant)
             and isinstance(node.body[0].value.value, str)
         ):
-            elts.append(
-                NamedExpr(Name("__doc__", Store()), Constant(node.body[0].value.value))
-            )
+            elts.append(NamedExpr(Name("__doc__"), Constant(node.body[0].value.value)))
             node.body.pop(0)
 
         elts.extend(self.list_visit(node.body).elts)
-        ns = Subscript(
-            self._conj(*elts, Call(Name("locals", Load()), [])),
-            Constant(-1),
-        )
+        ns = Subscript(self._conj(*elts, Call(Name("locals"), [])), Constant(-1))
 
-        metaclass = Name("type", Load())
+        metaclass = Name("type")
         keywords = []
         for kw in node.keywords:
             if kw.arg == "metaclass":
@@ -472,12 +515,12 @@ class OneLine(NodeTransformer):
             else:
                 keywords.append(kw)
         return NamedExpr(
-            Name(node.name, Store()),
+            Name(node.name),
             Call(
                 metaclass,
                 [
                     Constant(node.name),
-                    Tuple(node.bases, Load()),
+                    Tuple(node.bases),
                     Call(Lambda(arguments(), ns), [], []),
                 ],
                 keywords,

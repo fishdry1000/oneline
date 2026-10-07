@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "鱼前三百", email = "stickymouse27@outlook.com" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.15"
 dependencies = [
     "pytest>=9.1.1",
 ]
