@@ -12,11 +12,7 @@ import sys
 def main() -> int:
     acc = 0
     for arg in sys.argv[1:]:
-        #        try:
         acc = acc + float(arg)
-    #        except ValueError:
-    #            print(f"add: except number, reveieved: {arg}", file=sys.stderr)
-    #            return 1
     print(acc)
     return 0
 

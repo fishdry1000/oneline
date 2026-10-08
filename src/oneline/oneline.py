@@ -69,8 +69,8 @@ class _Scope:
 class OneLine(NodeTransformer):
     type BreakType = Literal["break", "continue", "return"]
     BREAK_TYPES: tuple[BreakType, ...] = get_args(BreakType.__value__)
-    type BreakHandler = Callable[[expr | None], None]
-    type Feature = BreakType | Literal["aug_assign", "nonlocal"]
+    type BreakHandler = Callable[[], None]
+    type Feature = BreakType | Literal["aug_assign"]
 
     def __init__(self) -> None:
         self.break_handlers: dict[OneLine.BreakType, list[OneLine.BreakHandler]] = {
@@ -118,30 +118,27 @@ class OneLine(NodeTransformer):
         )
 
     def visit(self, node: AST) -> expr:
-        print(f"visiting: {type(node).__name__}")
         res = super().visit(node)
         if not isinstance(res, expr):
             raise NotSupportedSyntaxError(node)
         return res
 
     def list_visit(self, nodes: list[stmt]) -> Tuple:
-        print(f"list visiting: {[type(node).__name__ for node in nodes]}")
         return self._conj(*(self.visit(node) for node in nodes))
 
     def list_visit_breakable(self, nodes: list[stmt], *break_types: BreakType) -> Tuple:
-        print(f"breakable list visiting: {[type(node).__name__ for node in nodes]}")
         self.used_features |= set(break_types)
         tup: Tuple = Tuple([])
         cur: list[expr] = tup.elts
-        is_breaking, break_value = None, None
+        is_breaking: OneLine.BreakType | None = None
 
-        def break_handler(t: OneLine.BreakType, value: expr | None):
-            nonlocal is_breaking, break_value
-            is_breaking, break_value = t, value
+        def break_handler(t: OneLine.BreakType):
+            nonlocal is_breaking
+            is_breaking = t
 
         for break_type in break_types:
             self.break_handlers[break_type].append(
-                lambda v, break_type=break_type: break_handler(break_type, v)
+                lambda break_type=break_type: break_handler(break_type)
             )
 
         self.just_breaked = set()
@@ -153,7 +150,7 @@ class OneLine(NodeTransformer):
                 newtup = Tuple([])
                 cur.append(BoolOp(Or(), [self._load_break_name(is_breaking), newtup]))
                 cur = newtup.elts
-                is_breaking, break_value = False, None
+                is_breaking = None
 
         if "return" in break_types and not isinstance(node, Return):
             cur.append(self.visit_Return(Return()))
@@ -165,14 +162,14 @@ class OneLine(NodeTransformer):
             self.break_handlers[break_type].pop()
         return tup
 
-    def bubble_break(self, t: BreakType, value: expr | None = None) -> None:
+    def bubble_break(self, t: BreakType) -> None:
         if not self.break_handlers[t]:
             raise ValueError(f"{t!r} is not allowed in this scope")
         self.used_features.add(t)
-        self.break_handlers[t][-1](value)
+        self.break_handlers[t][-1]()
 
     def visit_Return(self, node: Return) -> NamedExpr:
-        self.bubble_break("return", node.value)
+        self.bubble_break("return")
         return self._store_break_name(
             "return", Tuple([node.value] if node.value else [Constant(None)])
         )
@@ -430,7 +427,6 @@ class OneLine(NodeTransformer):
 
     def visit_Nonlocal(self, node: Nonlocal) -> Tuple:
         self._scopes[-1].nonlocals |= set(node.names)
-        self.used_features.add("nonlocal")
         return Tuple([])
 
     def visit_Global(self, node: Global) -> Tuple:
@@ -570,7 +566,7 @@ def main() -> int:
 
     with open(target_file, mode="w+") as f:
         try:
-            source = f.write(target)
+            f.write(target)
         except OSError as e:
             print(f"oneline.py: cannot write file {target_file}: {e}", file=sys.stderr)
             return 2

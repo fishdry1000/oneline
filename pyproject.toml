@@ -1,21 +1,19 @@
 [project]
 name = "oneline"
 version = "0.1.0"
-description = "Add your description here"
+description = "Compile Python code into one line"
 readme = "README.md"
 authors = [
     { name = "鱼前三百", email = "stickymouse27@outlook.com" }
 ]
 requires-python = ">=3.15"
-dependencies = [
-    "pytest>=9.1.1",
-]
+dependencies = []
 
 [project.scripts]
 oneline = "oneline:main"
 
 [dependency-groups]
-dev = ["pytest>=8.4"]
+dev = ["pytest>=9.1.1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

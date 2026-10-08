@@ -19,11 +19,8 @@ def compile_one_line():
     """Compile Python source into its one-line form."""
 
     def compile_(source: str) -> str:
-        # the transformer prints debug info while visiting
-        buf = io.StringIO()
-        with redirect_stdout(buf):
-            tree = OneLine().visit(parse(source))
-            fix_missing_locations(tree)
+        tree = OneLine().visit(parse(source))
+        fix_missing_locations(tree)
         return unparse(tree)
 
     return compile_
