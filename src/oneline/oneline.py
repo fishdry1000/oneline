@@ -53,17 +53,11 @@ from ast import (
     unparse,
 )
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import ClassVar, Literal, get_args
 
 
 class NotSupportedSyntaxError(ValueError): ...
-
-
-class _Scope:
-    def __init__(self, name: str | None):
-        self.name = name
-        self.nonlocals: set[str] = set()
-        self.globals: set[str] = set()
 
 
 class OneLine(NodeTransformer):
@@ -72,13 +66,19 @@ class OneLine(NodeTransformer):
     type BreakHandler = Callable[[], None]
     type Feature = BreakType | Literal["aug_assign"]
 
+    @dataclass
+    class Scope:
+        name: str | None
+        nonlocals: set[str] = field(default_factory=set)
+        globals: set[str] = field(default_factory=set)
+
     def __init__(self) -> None:
         self.break_handlers: dict[OneLine.BreakType, list[OneLine.BreakHandler]] = {
             t: [] for t in self.BREAK_TYPES
         }
         self.used_features: set[OneLine.Feature] = set()
         self.just_breaked: set[OneLine.BreakType] = set()
-        self._scopes: list[_Scope] = [_Scope(None)]
+        self._scopes: list[OneLine.Scope] = [OneLine.Scope(None)]
 
     @staticmethod
     def _gen_name(s: str):
@@ -481,7 +481,7 @@ class OneLine(NodeTransformer):
         return CheckScope().visit(node)
 
     def visit_FunctionDef(self, node: FunctionDef) -> NamedExpr:
-        self._scopes.append(_Scope(node.name))
+        self._scopes.append(OneLine.Scope(node.name))
         res = NamedExpr(
             Name(node.name),
             Lambda(
@@ -502,9 +502,7 @@ class OneLine(NodeTransformer):
         return res
 
     def visit_ClassDef(self, node: ClassDef) -> NamedExpr:
-        self._scopes.append(_Scope(None))
-        if not node.body:
-            raise NotSupportedSyntaxError(node)
+        self._scopes.append(OneLine.Scope(None))
         elts = []
         if (
             isinstance(node.body[0], Expr)
@@ -529,11 +527,7 @@ class OneLine(NodeTransformer):
             Name(node.name),
             Call(
                 metaclass,
-                [
-                    Constant(node.name),
-                    Tuple(node.bases),
-                    Call(Lambda(arguments(), ns), [], []),
-                ],
+                [Constant(node.name), Tuple(node.bases), Call(Lambda(arguments(), ns))],
                 keywords,
             ),
         )
