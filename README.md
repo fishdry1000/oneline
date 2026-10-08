@@ -1,7 +1,9 @@
 # oneline.py
 
+Write your Python code in one line.  
 把你的 python 代码写成一行
 
+Usage:  
 用法：
 
 ```sh
