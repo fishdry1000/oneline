@@ -12,7 +12,7 @@ import sys
 def main() -> int:
     acc = 0
     for arg in sys.argv[1:]:
-        acc = acc + float(arg)
+        acc += float(arg)
     print(acc)
     return 0
 

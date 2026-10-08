@@ -64,7 +64,7 @@ class OneLine(NodeTransformer):
     type BreakType = Literal["break", "continue", "return"]
     BREAK_TYPES: tuple[BreakType, ...] = get_args(BreakType.__value__)
     type BreakHandler = Callable[[], None]
-    type Feature = BreakType | Literal["aug_assign"]
+    type Feature = Literal["aug_assign", "takewhile"]
 
     @dataclass
     class Scope:
@@ -106,6 +106,18 @@ class OneLine(NodeTransformer):
         return NamedExpr(Name(OneLine._gen_name(t)), v)
 
     @staticmethod
+    def _pop_doc(body: list[stmt]) -> NamedExpr | Tuple:
+        if (
+            isinstance(body[0], Expr)
+            and isinstance(body[0].value, Constant)
+            and isinstance(body[0].value.value, str)
+        ):
+            res = NamedExpr(Name("__doc__"), Constant(body[0].value.value))
+            body.pop(0)
+            return res
+        return Tuple()
+
+    @staticmethod
     def _conj(*es: expr) -> Tuple:
         elts = []
         for e in es:
@@ -130,8 +142,7 @@ class OneLine(NodeTransformer):
         return self._conj(*(self.visit(node) for node in nodes))
 
     def list_visit_breakable(self, nodes: list[stmt], *break_types: BreakType) -> Tuple:
-        self.used_features |= set(break_types)
-        tup: Tuple = Tuple([])
+        tup: Tuple = Tuple()
         cur: list[expr] = tup.elts
         is_breaking: OneLine.BreakType | None = None
 
@@ -146,11 +157,12 @@ class OneLine(NodeTransformer):
 
         self.just_breaked = set()
         node = None
+        last = nodes[-1] if type(nodes[-1]).__name__.lower() in break_types else None
         for node in nodes:
             self._flatten_append(cur, self._check_scope(self.visit(node)))
-            if is_breaking:
+            if is_breaking and node is not last:
                 self.just_breaked.add(is_breaking)
-                newtup = Tuple([])
+                newtup = Tuple()
                 self._flatten_append(
                     cur, BoolOp(Or(), [self._load_break_name(is_breaking), newtup])
                 )
@@ -170,7 +182,6 @@ class OneLine(NodeTransformer):
     def bubble_break(self, t: BreakType) -> None:
         if not self.break_handlers[t]:
             raise ValueError(f"{t!r} is not allowed in this scope")
-        self.used_features.add(t)
         self.break_handlers[t][-1]()
 
     def visit_Return(self, node: Return) -> NamedExpr:
@@ -197,8 +208,10 @@ class OneLine(NodeTransformer):
             compile(unparse(node), "<oneline>", "exec")
         except SyntaxError as e:
             raise NotSupportedSyntaxError(node) from e
-        res = self.list_visit(node.body)
-        if "break" in self.used_features:
+
+        res = self._conj(self._pop_doc(node.body), self.list_visit(node.body))
+
+        if "takewhile" in self.used_features:
             res = self._conj(parse(self.TAKEWHILE, mode="eval").body, res)
         if "aug_assign" in self.used_features:
             res = self._conj(
@@ -221,17 +234,17 @@ class OneLine(NodeTransformer):
 
     def visit_For(self, node: For) -> ListComp | Tuple:
         elt = self.list_visit_breakable(node.body, "continue", "break")
-        iter = (
-            Call(
+        if "break" in self.just_breaked:
+            self.used_features.add("takewhile")
+            iter = Call(
                 self._load_name("takewhile"),
                 [
                     Lambda(arguments(), UnaryOp(Not(), self._load_break_name("break"))),
                     node.iter,
                 ],
             )
-            if "break" in self.just_breaked
-            else node.iter
-        )
+        else:
+            iter = node.iter
 
         lc = ListComp(elt, [comprehension(node.target, iter, [], is_async=0)])
 
@@ -266,6 +279,7 @@ class OneLine(NodeTransformer):
                 Call(Name("iter"), [Name("int"), Constant(1)]),
             ],
         )
+        self.used_features.add("takewhile")
 
         lc = ListComp(elt, [comprehension(Name("_"), iter, [], is_async=0)])
 
@@ -284,7 +298,7 @@ class OneLine(NodeTransformer):
         return lc
 
     def visit_Pass(self, node: Pass) -> Tuple:
-        return Tuple([])
+        return Tuple()
 
     @staticmethod
     def _fix_slice(s: Slice) -> Call:
@@ -432,11 +446,11 @@ class OneLine(NodeTransformer):
 
     def visit_Nonlocal(self, node: Nonlocal) -> Tuple:
         self._scopes[-1].nonlocals |= set(node.names)
-        return Tuple([])
+        return Tuple()
 
     def visit_Global(self, node: Global) -> Tuple:
         self._scopes[-1].globals |= set(node.names)
-        return Tuple([])
+        return Tuple()
 
     def _check_scope(self, node: expr) -> expr:
         scope = self._scopes[-1]
@@ -494,6 +508,7 @@ class OneLine(NodeTransformer):
                 Subscript(
                     Subscript(
                         self._conj(
+                            self._pop_doc(node.body),
                             self.list_visit_breakable(node.body, "return"),
                             self._load_break_name("return"),
                         ),
@@ -508,17 +523,14 @@ class OneLine(NodeTransformer):
 
     def visit_ClassDef(self, node: ClassDef) -> NamedExpr:
         self._scopes.append(OneLine.Scope(None))
-        elts = []
-        if (
-            isinstance(node.body[0], Expr)
-            and isinstance(node.body[0].value, Constant)
-            and isinstance(node.body[0].value.value, str)
-        ):
-            elts.append(NamedExpr(Name("__doc__"), Constant(node.body[0].value.value)))
-            node.body.pop(0)
-
-        elts.extend(self.list_visit(node.body).elts)
-        ns = Subscript(self._conj(*elts, Call(Name("locals"), [])), Constant(-1))
+        ns = Subscript(
+            self._conj(
+                self._pop_doc(node.body),
+                self.list_visit(node.body),
+                Call(Name("locals"), []),
+            ),
+            Constant(-1),
+        )
 
         metaclass = Name("type")
         keywords = []
