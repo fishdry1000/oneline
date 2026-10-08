@@ -113,9 +113,12 @@ class OneLine(NodeTransformer):
                 elts.extend(e.elts)
             else:
                 elts.append(e)
-        return Tuple(
-            elts,
-        )
+        return Tuple(elts)
+
+    @staticmethod
+    def _flatten_append(l: list[expr], *es: expr) -> None:
+        tup = OneLine._conj(*es)
+        l.extend(tup.elts)
 
     def visit(self, node: AST) -> expr:
         res = super().visit(node)
@@ -144,16 +147,18 @@ class OneLine(NodeTransformer):
         self.just_breaked = set()
         node = None
         for node in nodes:
-            cur.append(self._check_scope(self.visit(node)))
+            self._flatten_append(cur, self._check_scope(self.visit(node)))
             if is_breaking:
                 self.just_breaked.add(is_breaking)
                 newtup = Tuple([])
-                cur.append(BoolOp(Or(), [self._load_break_name(is_breaking), newtup]))
+                self._flatten_append(
+                    cur, BoolOp(Or(), [self._load_break_name(is_breaking), newtup])
+                )
                 cur = newtup.elts
                 is_breaking = None
 
         if "return" in break_types and not isinstance(node, Return):
-            cur.append(self.visit_Return(Return()))
+            self._flatten_append(cur, self.visit_Return(Return()))
 
         for break_type in self.just_breaked:
             tup.elts.insert(0, self._store_break_name(break_type, Constant(None)))
